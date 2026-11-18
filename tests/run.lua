@@ -89,18 +89,24 @@ end)
 
 test("resolve_repository defaults to core over HTTPS", function()
     local repository = ext.resolve_repository(nil)
+    assert_equal(repository.name, "core")
+    assert_equal(repository.type, ext.REPOSITORY_TYPE_CORE)
     assert_equal(repository.url, "http://extensions.duckdb.org")
     assert_equal(repository.download_url, "https://extensions.duckdb.org")
 end)
 
 test("resolve_repository resolves community", function()
     local repository = ext.resolve_repository("community")
+    assert_equal(repository.name, "community")
+    assert_equal(repository.type, ext.REPOSITORY_TYPE_COMMUNITY)
     assert_equal(repository.url, "http://community-extensions.duckdb.org")
     assert_equal(repository.download_url, "https://community-extensions.duckdb.org")
 end)
 
 test("resolve_repository keeps a custom URL and removes trailing slashes", function()
     local repository = ext.resolve_repository("http://ext.example.com/repo/")
+    assert_equal(repository.name, "")
+    assert_equal(repository.type, ext.REPOSITORY_TYPE_CORE)
     assert_equal(repository.url, "http://ext.example.com/repo")
     assert_equal(repository.download_url, "http://ext.example.com/repo")
 end)
@@ -171,37 +177,72 @@ test("parse_footer rejects data of the wrong size", function()
     end, "must be 512 bytes")
 end)
 
-test("encode_install_info matches DuckDB output for a plain ETag", function()
-    local encoded = ext.encode_install_info({
-        mode = ext.INSTALL_MODE_REPOSITORY,
-        full_path = "http://extensions.duckdb.org/v1.5.6/osx_arm64/parquet.duckdb_extension.gz",
-        repository_url = "http://extensions.duckdb.org",
-        version = "v1.5.6",
-        etag = '"11fdcfddcd63a1ed5caaabf78ff112b0"',
-    })
+---@param repository_option string|nil
+---@param name string
+---@param version string
+---@param extension_version string
+---@param etag string
+---@return string
+local function encode_repository_info(repository_option, name, version, extension_version, etag)
+    local info = ext.repository_install_info(
+        ext.resolve_repository(repository_option),
+        name,
+        ext.parse_version(version),
+        "osx_arm64",
+        extension_version,
+        etag
+    )
+    return ext.encode_install_info(info)
+end
+
+--- Removes the signing key fingerprint (field 107) from an install info file that DuckDB wrote.
+--- The plugin does not verify signatures, so it does not write this field.
+---@param content string
+---@return string
+local function without_fingerprint(content)
+    local start = content:find("k\0Gsha256:", 1, true)
+    assert(start ~= nil, "fixture has no signing key fingerprint")
+    return content:sub(1, start - 1) .. "\255\255"
+end
+
+test("repository_install_info matches DuckDB v1.5.6 output for a plain ETag", function()
+    local encoded = encode_repository_info(nil, "parquet", "1.5.6", "v1.5.6", '"11fdcfddcd63a1ed5caaabf78ff112b0"')
     assert_equal(encoded, read_fixture("parquet-v1.5.6-osx_arm64.info"), "parquet info")
 end)
 
-test("encode_install_info matches DuckDB output for a multipart ETag", function()
-    local encoded = ext.encode_install_info({
-        mode = ext.INSTALL_MODE_REPOSITORY,
-        full_path = "http://extensions.duckdb.org/v1.5.6/osx_arm64/spatial.duckdb_extension.gz",
-        repository_url = "http://extensions.duckdb.org",
-        version = "04270fe",
-        etag = '"045d5574f93f0f6aae01bca31e8ca206-3"',
-    })
+test("repository_install_info matches DuckDB v1.5.6 output for a multipart ETag", function()
+    local encoded =
+        encode_repository_info("core", "spatial", "1.5.6", "04270fe", '"045d5574f93f0f6aae01bca31e8ca206-3"')
     assert_equal(encoded, read_fixture("spatial-v1.5.6-osx_arm64.info"), "spatial info")
 end)
 
-test("encode_install_info matches DuckDB output from DuckDB v1.1.3", function()
-    local encoded = ext.encode_install_info({
-        mode = ext.INSTALL_MODE_REPOSITORY,
-        full_path = "http://extensions.duckdb.org/v1.1.3/osx_arm64/arrow.duckdb_extension.gz",
-        repository_url = "http://extensions.duckdb.org",
-        version = "c50862c",
-        etag = '"988aa394177e5f9a5fb7d054facb138a"',
-    })
+test("repository_install_info matches DuckDB v1.1.3 output", function()
+    local encoded = encode_repository_info(nil, "arrow", "1.1.3", "c50862c", '"988aa394177e5f9a5fb7d054facb138a"')
     assert_equal(encoded, read_fixture("arrow-v1.1.3-osx_arm64.info"), "arrow info")
+end)
+
+test("repository_install_info matches DuckDB v2.0.0 output for a core extension", function()
+    local encoded = encode_repository_info(nil, "inet", "2.0.0", "fe7f60bb60", '"53588158574505e37e946aed337d9e47"')
+    assert_equal(encoded, without_fingerprint(read_fixture("inet-v2.0.0-osx_arm64.duckdb.info")), "inet info")
+end)
+
+test("repository_install_info matches DuckDB v2.0.0 output for a community extension", function()
+    local encoded = encode_repository_info("community", "h3", "2.0.0", "v1.5.6", '"ad1fa0052d6efa9eed243fffa1b4e569"')
+    assert_equal(encoded, without_fingerprint(read_fixture("h3-v2.0.0-osx_arm64.duckdb.info")), "h3 info")
+end)
+
+test("repository_install_info omits the repository name of a custom URL", function()
+    local info = ext.repository_install_info(
+        ext.resolve_repository("https://ext.example.com"),
+        "myext",
+        ext.parse_version("2.0.0+v0.4.0"),
+        "osx_arm64",
+        "v0.4.0",
+        nil
+    )
+    assert_equal(info.full_path, "https://ext.example.com/myext/v0.4.0/v2.0.0/osx_arm64/myext.duckdb_extension.gz")
+    assert_equal(info.repository_type, ext.REPOSITORY_TYPE_CORE)
+    assert_equal(info.repository_name, "")
 end)
 
 test("encode_install_info omits an empty ETag", function()

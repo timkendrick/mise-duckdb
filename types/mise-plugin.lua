@@ -12,6 +12,7 @@
 ---@field envType string|nil libc environment type ("gnu" on glibc Linux, "musl" on musl Linux, nil on other platforms)
 ---@field version string Runtime version
 ---@field pluginDirPath string Path to the plugin directory
+---@field cacheDirPath string|nil Persistent cache directory for the plugin
 RUNTIME = {}
 
 --- @deprecated Use RUNTIME.osType instead
@@ -107,8 +108,13 @@ ARCH_TYPE = ""
 ---@field tool string Tool name
 ---@field options table Plugin options from mise.toml
 
+---@class BackendVersionEntry
+---@field version string Version string
+---@field created_at? string Release date as an RFC 3339 timestamp
+
 ---@class BackendListVersionsResult
----@field versions string[] List of available versions
+---@field versions (string|BackendVersionEntry)[] List of available versions, oldest first
+---@field aliases? table<string, string> Moving version names mapped to versions
 
 ---@class BackendInstallCtx
 ---@field tool string Tool name
@@ -127,6 +133,25 @@ ARCH_TYPE = ""
 
 ---@class BackendExecEnvResult
 ---@field env_vars EnvKey[] Environment variables to set
+---@field watch_files? string[] Files whose changes rerun the hook
+---@field cacheable? boolean Whether mise caches the result (default true)
+
+---@class BackendUninstallCtx
+---@field tool string Tool name
+---@field version string Installed version
+---@field install_path string Installation path, which still exists
+---@field download_path string Download path
+---@field options table Plugin options from the current mise.toml
+
+---@class BackendToolEntry
+---@field name string Tool name without the plugin prefix
+---@field description? string Tool description
+
+---@class BackendListToolsResult
+---@field tools BackendToolEntry[] Tools that the backend manages
+
+---@class BackendSearchToolsCtx
+---@field query string Text to search for
 
 ---@class SystemDependency
 ---@field bin? string Executable that must be on PATH
@@ -158,6 +183,9 @@ ARCH_TYPE = ""
 ---@field BackendListVersions? fun(self: Plugin, ctx: BackendListVersionsCtx): BackendListVersionsResult
 ---@field BackendInstall? fun(self: Plugin, ctx: BackendInstallCtx): BackendInstallResult
 ---@field BackendExecEnv? fun(self: Plugin, ctx: BackendExecEnvCtx): BackendExecEnvResult
+---@field BackendUninstall? fun(self: Plugin, ctx: BackendUninstallCtx)
+---@field BackendListTools? fun(self: Plugin, ctx: table): BackendListToolsResult
+---@field BackendSearchTools? fun(self: Plugin, ctx: BackendSearchToolsCtx): BackendListToolsResult
 PLUGIN = {}
 
 ------------------------------------------------------------------------
@@ -179,6 +207,9 @@ PLUGIN = {}
 ---@field get fun(opts: HttpRequestOpts): HttpResponse Send a GET request
 ---@field head fun(opts: HttpRequestOpts): HttpResponse Send a HEAD request (no body)
 ---@field download_file fun(opts: HttpRequestOpts, path: string) Download a file to disk
+---@field try_get fun(opts: HttpRequestOpts): HttpResponse|nil, string|nil Send a GET request without raising on network errors
+---@field try_head fun(opts: HttpRequestOpts): HttpResponse|nil, string|nil Send a HEAD request without raising on network errors
+---@field try_download_file fun(opts: HttpRequestOpts, path: string): boolean|nil, string|nil Download a file without raising
 local http = {}
 
 -- json module --------------------------------------------------------
@@ -190,11 +221,25 @@ local json = {}
 
 -- file module --------------------------------------------------------
 
+---@class FileStat
+---@field size integer File size in bytes
+---@field is_file boolean
+---@field is_dir boolean
+---@field is_symlink boolean
+---@field modified? integer
+---@field accessed? integer
+---@field created? integer
+---@field mode? string Octal permission string on Unix
+
 ---@class file
 ---@field read fun(path: string): string Read file contents
 ---@field exists fun(path: string): boolean Check if a file exists
 ---@field symlink fun(src: string, dst: string) Create a symbolic link
 ---@field join_path fun(...: string): string Join path components
+---@field stat fun(path: string): FileStat|nil Inspect a path without following links; nil when missing
+---@field list fun(dir: string): string[] Full paths of a directory's entries, sorted
+---@field glob fun(pattern: string): string[] Paths that match a pattern, sorted
+---@field move fun(from: string, to: string) Move a file or directory
 local file = {}
 
 -- cmd module ---------------------------------------------------------
@@ -202,7 +247,7 @@ local file = {}
 ---@class CmdExecOpts
 ---@field cwd? string Working directory
 ---@field env? table<string, string> Environment variables
----@field timeout? integer Timeout in milliseconds
+---@field timeout? number Timeout in seconds
 
 ---@class cmd
 ---@field exec fun(command: string, opts?: CmdExecOpts): string Execute a shell command

@@ -1,103 +1,140 @@
---- Installs a specific version of a tool
+local cmd = require("cmd")
+local file = require("file")
+local http = require("http")
+local json = require("json")
+local log = require("log")
+local ext = require("duckdb_ext")
+
+---@param path string
+---@return string
+local function md5_digest(path)
+    local command = RUNTIME.osType == "darwin" and 'md5 -q "$FILE"' or 'md5sum "$FILE"'
+    local digest = cmd.exec(command, { env = { FILE = path } }):match("^(%x+)")
+    if digest == nil then
+        error("cannot compute the MD5 digest of " .. path)
+    end
+    return digest:lower()
+end
+
+---@param path string
+---@return string
+local function read_footer(path)
+    local handle, open_error = io.open(path, "rb")
+    if handle == nil then
+        error("cannot open " .. path .. ": " .. tostring(open_error))
+    end
+    local size = handle:seek("end")
+    if size < ext.FOOTER_SIZE then
+        handle:close()
+        error("file is not a DuckDB extension: " .. path .. " has only " .. size .. " bytes")
+    end
+    handle:seek("set", size - ext.FOOTER_SIZE)
+    local footer = handle:read(ext.FOOTER_SIZE)
+    handle:close()
+    return footer
+end
+
+---@param path string
+---@param content string
+local function write_file(path, content)
+    local handle, open_error = io.open(path, "wb")
+    if handle == nil then
+        error("cannot write " .. path .. ": " .. tostring(open_error))
+    end
+    handle:write(content)
+    handle:close()
+end
+
+---@param source string
+---@param target string
+local function replace_with_symlink(source, target)
+    if file.stat(target) ~= nil then
+        local removed, remove_error = os.remove(target)
+        if not removed then
+            error("cannot replace " .. target .. ": " .. tostring(remove_error))
+        end
+    end
+    file.symlink(source, target)
+end
+
+--- Downloads a DuckDB extension into the install directory and links it into the DuckDB extension directory.
 --- Documentation: https://mise.jdx.dev/backend-plugin-development.html#backendinstall
---- @param ctx BackendInstallCtx Context for the requested backend tool installation
---- @return table Empty table on success
+--- @param ctx BackendInstallCtx
+--- @return BackendInstallResult
 function PLUGIN:BackendInstall(ctx)
-    local tool = ctx.tool
-    local version = ctx.version
-    local install_path = ctx.install_path
-    local download_path = ctx.download_path
-    -- local options = ctx.options -- Plugin options from mise.toml
+    local options = ctx.options or {}
+    local name = ext.validate_extension_name(ctx.tool)
+    local version = ext.parse_version(ctx.version)
+    local repository = ext.resolve_repository(options.repository)
+    local platform = ext.platform(RUNTIME.osType, RUNTIME.archType, RUNTIME.envType)
+    local root = ext.extension_root(options.extension_directory, os.getenv("HOME"))
 
-    -- Validate inputs
-    if not tool or tool == "" then
-        error("Tool name cannot be empty")
+    local download_url = ext.extension_url(repository.download_url, name, version, platform)
+    local response = http.head({ url = download_url })
+    if response.status_code == 404 or response.status_code == 403 then
+        local subject = name
+        if version.extension_version ~= nil then
+            subject = name .. " " .. version.extension_version
+        end
+        error(
+            string.format(
+                "%s is not published for DuckDB %s on %s in %s (HTTP %d from %s)",
+                subject,
+                version.duckdb_version,
+                platform,
+                repository.url,
+                response.status_code,
+                download_url
+            )
+        )
+    elseif response.status_code ~= 200 then
+        error("checking " .. download_url .. " failed: HTTP " .. response.status_code)
     end
-    if not version or version == "" then
-        error("Version cannot be empty")
-    end
-    if not install_path or install_path == "" then
-        error("Install path cannot be empty")
-    end
-    if not download_path or download_path == "" then
-        error("Download path cannot be empty")
-    end
+    local etag = response.headers["etag"]
 
-    -- Create installation directory
-    local cmd = require("cmd")
-    cmd.exec("mkdir -p " .. install_path)
+    local archive_path = file.join_path(ctx.download_path, name .. ".duckdb_extension.gz")
+    http.download_file({ url = download_url }, archive_path)
 
-    -- Example implementations (choose/modify based on your backend):
-
-    -- Example 1: Package manager installation (like npm, pip)
-    local install_cmd = "<BACKEND> install " .. tool .. "@" .. version .. " --target " .. install_path
-    local result = cmd.exec(install_cmd)
-
-    if result:match("error") or result:match("failed") then
-        error("Failed to install " .. tool .. "@" .. version .. ": " .. result)
-    end
-
-    -- Example 2: Download and extract from URL
-    --[[
-    local http = require("http")
-    local file = require("file")
-    local archiver = require("archiver")
-
-    -- Construct download URL (adjust based on your backend's URL pattern)
-    local platform = RUNTIME.osType:lower()
-    local arch = RUNTIME.archType
-    local download_url = "https://releases.<BACKEND>.org/" .. tool .. "/" .. version .. "/" .. tool .. "-" .. platform .. "-" .. arch .. ".tar.gz"
-
-    -- Download the tool
-    local temp_file = file.join_path(download_path, tool .. ".tar.gz")
-    http.download_file({
-        url = download_url
-    }, temp_file)
-
-    -- Extract the archive
-    archiver.decompress(temp_file, install_path)
-
-    -- Set executable permissions
-    cmd.exec("chmod +x " .. install_path .. "/bin/" .. tool)
-    --]]
-
-    -- Example 3: Build from source
-    --[[
-    local git_url = "https://github.com/owner/" .. tool .. ".git"
-
-    -- Clone the repository
-    cmd.exec("git clone " .. git_url .. " " .. install_path .. "/src")
-    cmd.exec("cd " .. install_path .. "/src && git checkout " .. version)
-
-    -- Build the tool (adjust based on build system)
-    local build_result = cmd.exec("cd " .. install_path .. "/src && make install PREFIX=" .. install_path)
-
-    if build_result:match("error") then
-        error("Failed to build " .. tool .. "@" .. version)
-    end
-
-    -- Clean up source
-    cmd.exec("rm -rf " .. install_path .. "/src")
-    --]]
-
-    -- Platform-specific installation logic
-    --[[
-    if RUNTIME.osType == "Darwin" then
-        -- macOS-specific installation
-        local macos_cmd = "<BACKEND> install-macos " .. tool .. "@" .. version .. " " .. install_path
-        cmd.exec(macos_cmd)
-    elseif RUNTIME.osType == "Linux" then
-        -- Linux-specific installation
-        local linux_cmd = "<BACKEND> install-linux " .. tool .. "@" .. version .. " " .. install_path
-        cmd.exec(linux_cmd)
-    elseif RUNTIME.osType == "Windows" then
-        -- Windows-specific installation
-        local windows_cmd = "<BACKEND> install-windows " .. tool .. "@" .. version .. " " .. install_path
-        cmd.exec(windows_cmd)
+    local expected_digest = ext.etag_md5(etag)
+    if expected_digest ~= nil then
+        local actual_digest = md5_digest(archive_path)
+        if actual_digest ~= expected_digest then
+            error(
+                "checksum mismatch for "
+                    .. download_url
+                    .. ": expected MD5 "
+                    .. expected_digest
+                    .. ", got "
+                    .. actual_digest
+            )
+        end
     else
-        error("Unsupported platform: " .. RUNTIME.osType)
+        log.debug("no MD5 digest in the ETag of", download_url, "so the download is not verified")
     end
-    --]]
+
+    local extension_file = name .. ".duckdb_extension"
+    local extension_path = file.join_path(ctx.install_path, extension_file)
+    cmd.exec('mkdir -p "$DIR" && gzip -dc "$ARCHIVE" > "$TARGET"', {
+        env = { DIR = ctx.install_path, ARCHIVE = archive_path, TARGET = extension_path },
+    })
+    local footer = ext.parse_footer(read_footer(extension_path))
+
+    local info_path = extension_path .. ".info"
+    local info = ext.repository_install_info(repository, name, version, platform, footer.extension_version, etag)
+    write_file(info_path, ext.encode_install_info(info))
+
+    local link_directory = file.join_path(root, version.duckdb_version, platform)
+    local links = {
+        { source = info_path, target = file.join_path(link_directory, extension_file .. ".info") },
+        { source = extension_path, target = file.join_path(link_directory, extension_file) },
+    }
+    write_file(file.join_path(ctx.install_path, ext.LINK_RECORD_FILE), json.encode({ links = links }))
+
+    cmd.exec('mkdir -p "$DIR"', { env = { DIR = link_directory } })
+    for _, link in ipairs(links) do
+        replace_with_symlink(link.source, link.target)
+    end
+    log.info(name, footer.extension_version, "linked into", link_directory)
 
     return {}
 end

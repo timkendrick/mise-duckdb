@@ -7,18 +7,25 @@ M.FOOTER_SIZE = 512
 M.LINK_RECORD_FILE = "mise-duckdb-links.json"
 M.DEFAULT_EXTENSION_DIRECTORY = "~/.duckdb/extensions"
 M.INSTALL_MODE_REPOSITORY = 1
+M.REPOSITORY_TYPE_CORE = 0
+M.REPOSITORY_TYPE_COMMUNITY = 1
 
---- Repository names that DuckDB knows, mapped to the URLs that DuckDB records in install info files.
+--- Repository names that DuckDB knows. The type selects the public keys that DuckDB trusts to sign their extensions.
 M.KNOWN_REPOSITORIES = {
-    core = "http://extensions.duckdb.org",
-    core_nightly = "http://nightly-extensions.duckdb.org",
-    community = "http://community-extensions.duckdb.org",
+    core = { url = "http://extensions.duckdb.org", type = M.REPOSITORY_TYPE_CORE },
+    core_nightly = { url = "http://nightly-extensions.duckdb.org", type = M.REPOSITORY_TYPE_CORE },
+    community = { url = "http://community-extensions.duckdb.org", type = M.REPOSITORY_TYPE_COMMUNITY },
 }
+
+--- The first DuckDB major version that records the repository type and name in install info files.
+local REPOSITORY_ORIGIN_MAJOR_VERSION = 2
 
 local FOOTER_FIELD_SIZE = 32
 local FOOTER_MAGIC_VALUE = "4"
 
 ---@class Repository
+---@field name string Known repository name, or "" for a custom URL
+---@field type integer Repository type that DuckDB records in install info files
 ---@field url string URL that DuckDB records as the repository of an installed extension
 ---@field download_url string URL that the plugin downloads from
 
@@ -38,6 +45,8 @@ local FOOTER_MAGIC_VALUE = "4"
 ---@field repository_url string
 ---@field version string
 ---@field etag string|nil
+---@field repository_type integer|nil Omitted from the file when nil or core
+---@field repository_name string|nil Omitted from the file when nil or empty
 
 ---@class DuckDBRelease
 ---@field version string
@@ -48,10 +57,6 @@ local FOOTER_MAGIC_VALUE = "4"
 ---@field prerelease boolean
 ---@field draft boolean
 ---@field published_at any
-
----@class ToolEntry
----@field name string
----@field description string
 
 ---@param name any
 ---@return string
@@ -89,13 +94,18 @@ function M.resolve_repository(option)
     if name == nil or name == "" then
         name = "core"
     end
-    local known_url = M.KNOWN_REPOSITORIES[name]
-    if known_url ~= nil then
-        return { url = known_url, download_url = (known_url:gsub("^http://", "https://")) }
+    local known = M.KNOWN_REPOSITORIES[name]
+    if known ~= nil then
+        return {
+            name = name,
+            type = known.type,
+            url = known.url,
+            download_url = (known.url:gsub("^http://", "https://")),
+        }
     end
     if name:match("^https?://") then
         local url = (name:gsub("/+$", ""))
-        return { url = url, download_url = url }
+        return { name = "", type = M.REPOSITORY_TYPE_CORE, url = url, download_url = url }
     end
     error("invalid repository '" .. name .. "': expected core, core_nightly, community, or an http:// or https:// URL")
 end
@@ -186,6 +196,17 @@ local function encode_field_id(id)
 end
 
 ---@param id integer
+---@param value integer|nil
+---@param default integer
+---@return string
+local function encode_integer_property(id, value, default)
+    if value == nil or value == default then
+        return ""
+    end
+    return encode_field_id(id) .. encode_varint(value)
+end
+
+---@param id integer
 ---@param value string|nil
 ---@return string
 local function encode_string_property(id, value)
@@ -205,8 +226,34 @@ function M.encode_install_info(info)
         encode_string_property(102, info.repository_url),
         encode_string_property(103, info.version),
         encode_string_property(104, info.etag),
+        encode_integer_property(105, info.repository_type, M.REPOSITORY_TYPE_CORE),
+        encode_string_property(106, info.repository_name),
         encode_field_id(0xFFFF),
     })
+end
+
+--- Describes an extension installed from a repository, in the form that the target DuckDB version reads.
+---@param repository Repository
+---@param name string
+---@param version ParsedVersion
+---@param platform string
+---@param extension_version string Extension version from the extension footer
+---@param etag string|nil
+---@return InstallInfo
+function M.repository_install_info(repository, name, version, platform, extension_version, etag)
+    local info = {
+        mode = M.INSTALL_MODE_REPOSITORY,
+        full_path = M.extension_url(repository.url, name, version, platform),
+        repository_url = repository.url,
+        version = extension_version,
+        etag = etag,
+    }
+    local major = tonumber(version.duckdb_version:match("^v(%d+)%.")) or 0
+    if major >= REPOSITORY_ORIGIN_MAJOR_VERSION then
+        info.repository_type = repository.type
+        info.repository_name = repository.name
+    end
+    return info
 end
 
 --- Returns the MD5 digest that an ETag holds, or nil when the ETag is not a plain MD5 digest.
@@ -301,7 +348,7 @@ end
 
 --- Combines extension names from repositories into tool entries. Earlier catalogs take precedence.
 ---@param catalogs {names: string[], description: string}[]
----@return ToolEntry[]
+---@return BackendToolEntry[]
 function M.merge_catalogs(catalogs)
     local seen = {}
     local tools = {}
@@ -319,9 +366,9 @@ function M.merge_catalogs(catalogs)
     return tools
 end
 
----@param tools ToolEntry[]
+---@param tools BackendToolEntry[]
 ---@param query string
----@return ToolEntry[]
+---@return BackendToolEntry[]
 function M.filter_tools(tools, query)
     local needle = query:lower()
     local result = {}
