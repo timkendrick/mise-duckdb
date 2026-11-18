@@ -1,340 +1,149 @@
-# mise backend plugin template
+# mise-duckdb
 
-This is a GitHub template for building a mise backend plugin using the vfox-style backend architecture.
+A [mise](https://mise.jdx.dev) backend plugin that manages DuckDB extensions declaratively.
 
-## What are Backend Plugins?
+Install duck DuckDB extensions in `mise.toml` instead of running `INSTALL` by hand:
 
-Backend plugins in mise extend the standard tool plugin system to manage **multiple tools** using the `plugin:tool` format. They're perfect for:
-
-- **Package managers** (npm, pip, cargo, gem)
-- **Tool families** (multiple related tools from one ecosystem) 
-- **Custom installations** that need to manage many tools
-
-Unlike tool plugins that manage one tool, backend plugins can install and manage multiple tools like `npm:prettier`, `npm:eslint`, `cargo:ripgrep`, etc.
-
-## Using this template
-
-### Option 1: Use GitHub's template feature (recommended)
-1. Click "Use this template" button on GitHub
-2. Name your repository (e.g., `mise-mybackend` or `vfox-mybackend`)
-3. Clone your new repository
-4. Follow the setup instructions below
-
-### Option 2: Clone and modify
-```bash
-git clone https://github.com/jdx/mise-backend-plugin-template mise-mybackend
-cd mise-mybackend
-rm -rf .git
-git init
+```toml
+[tools]
+"aqua:duckdb/duckdb" = "latest"
+"duckdb:spatial" = "latest"
+"duckdb:h3" = { version = "latest", repository = "community" }
 ```
 
-## Setup Instructions
+Plugins are downloaded into DuckDB's extension directory for the right DuckDB version, ready to `LOAD`.
 
-### 1. Replace placeholders
+## Install the plugin
 
-Search and replace these placeholders throughout the project:
-- `<BACKEND>` → your backend name (e.g., `npm`, `cargo`, `pip`)
-- `<GITHUB_USER>` → your GitHub username or organization  
-- `<TEST_TOOL>` → a real tool name your backend can install (for testing)
-
-Files to update:
-- `metadata.lua` - Update name, version, description, author, license, homepage, and optional metadata
-- `hooks/*.lua` - Replace placeholders and implement your backend logic
-- `mise-tasks/test` - Update test tool name and commands
-- `README.md` - Update this file with your backend's information
-
-### 2. Implement the backend hooks
-
-Backend plugins require three main hooks:
-
-#### `hooks/backend_list_versions.lua`
-Lists available versions for a tool in your backend.
-
-```lua
-function PLUGIN:BackendListVersions(ctx)
-    local tool = ctx.tool
-    -- local options = ctx.options
-    -- Your logic to fetch versions for the tool
-    -- Return: {versions = {"1.0.0", "1.1.0", "2.0.0"}}
-end
+```sh
+mise plugin install duckdb https://github.com/timkendrick/mise-duckdb
 ```
 
-**Examples**:
-- **API-based**: Query npm registry, PyPI, crates.io APIs
-- **Command-based**: Run `npm view <tool> versions`, `pip index versions <tool>`
-- **File-based**: Parse registry files or manifests
+Each extension is then available as `duckdb:<extension>`, for example `duckdb:spatial` or `duckdb:httpfs`.
 
-#### `hooks/backend_install.lua` 
-Installs a specific version of a tool.
+### The DuckDB CLI tool name
 
-```lua
-function PLUGIN:BackendInstall(ctx)
-    local tool = ctx.tool
-    local version = ctx.version  
-    local install_path = ctx.install_path
-    local download_path = ctx.download_path
-    -- local options = ctx.options
-    -- Your logic to install the tool
-    -- Return: {}
-end
+When this plugin is installed as `duckdb`, mise reads the bare tool name `duckdb` as a reference to the plugin, not to the DuckDB CLI.
+
+Install the CLI with its full backend name instead:
+
+```toml
+[tools]
+# Before
+duckdb = "latest"
+
+# After
+"aqua:duckdb/duckdb" = "latest"
 ```
 
-**Examples**:
-- **Package manager**: `npm install <tool>@<version>`, `pip install <tool>==<version>`
-- **Download & extract**: Download binary/archive and extract to install_path
-- **Build from source**: Clone repository, checkout version, build and install
+## Versions
 
-#### `hooks/backend_exec_env.lua`
-Sets up environment variables for a tool.
+DuckDB extension binaries work with one DuckDB version only. A DuckDB extension repository serves one build of each extension for each DuckDB version and platform. The plugin uses the DuckDB version as the mise version.
 
-```lua
-function PLUGIN:BackendExecEnv(ctx)
-    local install_path = ctx.install_path
-    -- local options = ctx.options
-    -- Your logic to set up environment
-    -- Return: {env_vars = {{key = "PATH", value = install_path .. "/bin"}}}
-end
+| mise version | Installs |
+| --- | --- |
+| `2.0.0` | The build of the extension that the repository serves for DuckDB 2.0.0 |
+| `latest` | The build for the newest stable DuckDB release |
+| `2.0.0+v0.4.0` | Version `v0.4.0` of the extension, built for DuckDB 2.0.0 |
+
+`mise ls-remote duckdb:<extension>` lists every stable DuckDB release. The list does not check that the repository publishes the extension for each release. If it does not, install fails with an error such as:
+
+```text
+spatial is not published for DuckDB v2.1.0 on osx_arm64 in http://extensions.duckdb.org
 ```
 
-**Examples**:
-- **Basic**: Add `bin/` directory to PATH
-- **Complex**: Set tool-specific environment variables, library paths
-- **Ecosystem-specific**: Like `node_modules/.bin` for npm, site-packages for Python
+### Install an extension for several DuckDB versions
 
-### 3. Platform considerations
+Use a list of versions. Each version links into the extension directory of its DuckDB version.
 
-Your backend may need to handle different operating systems:
-
-```lua
--- Available in all hooks via RUNTIME object
-if RUNTIME.osType == "Darwin" then
-    -- macOS-specific logic
-elseif RUNTIME.osType == "Linux" then  
-    -- Linux-specific logic
-elseif RUNTIME.osType == "Windows" then
-    -- Windows-specific logic
-end
+```toml
+[tools]
+"duckdb:h3" = { version = ["1.5.6", "2.0.0"], repository = "community" }
 ```
 
-### 4. Error handling
+### Published extension versions
 
-Provide meaningful error messages:
+Some repositories also publish fixed versions of an extension. DuckDB installs these with `INSTALL <extension> VERSION '<version>'`. To install one, add the extension version after a `+`:
 
-```lua
-function PLUGIN:BackendListVersions(ctx)
-    local tool = ctx.tool
-
-    if not tool or tool == "" then
-        error("Tool name cannot be empty")
-    end
-
-    -- ... your implementation ...
-    
-    if #versions == 0 then
-        error("No versions found for " .. tool)
-    end
-    
-    return {versions = versions}
-end
+```toml
+[tools]
+"duckdb:myext" = { version = "2.0.0+v0.4.0", repository = "https://ext.example.com" }
 ```
 
-## Development Workflow
+The plugin downloads only the published version. If the repository does not publish it, install fails. The core and community repositories do not publish fixed versions.
 
-### Setting up development environment
+### Extension versions
 
-1. Install pre-commit hooks (optional but recommended):
-```bash
-hk install
+Each extension also has its own version, such as `v1.5.6` or a short git hash such as `a3dbcd1781`. The plugin reads this version from the downloaded extension. DuckDB shows it in the `extension_version` column of `duckdb_extensions()`.
+
+## Tool options
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `repository` | `core` | `core`, `core_nightly`, `community`, or the `http://` or `https://` URL of a custom repository |
+| `extension_directory` | `~/.duckdb/extensions` | The DuckDB extension directory. Set it if you change DuckDB's `extension_directory` setting. The plugin adds the DuckDB version and platform directories below it. |
+
+A custom repository must use the directory layout of the DuckDB repositories. For example, for DuckDB 2.0.0 on macOS on Apple silicon:
+
+```text
+https://ext.example.com/v2.0.0/osx_arm64/myext.duckdb_extension.gz
+https://ext.example.com/myext/v0.4.0/v2.0.0/osx_arm64/myext.duckdb_extension.gz
 ```
 
-This sets up automatic linting and formatting on git commits.
+Local directories are not supported as repositories.
 
-### Local Testing
+## How install works
 
-1. Link your plugin for development:
-```bash
-mise plugin link --force <BACKEND> .
+For `"duckdb:spatial" = "2.0.0"` on macOS on Apple silicon, install does these steps:
+
+1. Download `https://extensions.duckdb.org/v2.0.0/osx_arm64/spatial.duckdb_extension.gz`. The plugin uses HTTPS for the core, core_nightly and community repositories.
+2. If the ETag of the download is an MD5 digest, compare it with the MD5 digest of the download.
+3. Decompress the extension into the mise install directory, such as `~/.local/share/mise/installs/duckdb-spatial/2.0.0/`.
+4. Read the extension version from the extension.
+5. Write the install info file `spatial.duckdb_extension.info` next to the extension. This file has the same content as the file that DuckDB writes for `INSTALL spatial`. It records the repository, so DuckDB shows it in `duckdb_extensions()`, uses it for `UPDATE EXTENSIONS`, and selects the keys that verify the signature of the extension.
+6. Link both files into `~/.duckdb/extensions/v2.0.0/osx_arm64/`. Install replaces files that are already there.
+
+The plugin does not verify extension signatures. DuckDB verifies the signature each time it loads an extension.
+
+## How uninstall works
+
+`mise uninstall` removes the links in the DuckDB extension directory, but only if they still point into the mise install directory. If DuckDB replaced a link, for example after `FORCE INSTALL` or `UPDATE EXTENSIONS`, uninstall keeps the file that DuckDB wrote.
+
+## Find extensions
+
+`mise search duckdb:` and shell completion list the extensions in the core and community repositories:
+
+- Core extension names come from the `duckdb` CLI on `PATH`. If the CLI is not available, they come from the core repository download statistics.
+- Community extension names come from the community repository download statistics.
+
+## Platforms
+
+The plugin supports macOS and Linux on x86-64 and ARM64, including Linux with musl. It needs `gzip`, `readlink`, and `md5` on macOS or `md5sum` on Linux. Windows is not supported.
+
+## Limitations
+
+- **Rebuilt extensions:** a repository can replace the build of an extension for a DuckDB version. mise does not detect this, because the DuckDB version does not change. To get the new build, run `mise install --force duckdb:<extension>`, or run `UPDATE EXTENSIONS` in DuckDB.
+- **Upgrades remove old builds:** for a tool with version `latest`, `mise upgrade` installs the build for the new DuckDB release and removes the build for the old release. A DuckDB CLI of the old version then cannot find the extension. Upgrade the DuckDB CLI at the same time.
+- **Built-in extensions:** the DuckDB CLI includes some extensions, such as `parquet`, `json` and `icu`. The plugin installs these, but DuckDB uses its built-in copy.
+- **Two versions for one DuckDB version:** if you configure both `2.0.0` and `2.0.0+v0.4.0` for one extension, both link to the same files. The last install wins.
+- **GitHub API:** the version list comes from the GitHub releases of DuckDB. mise caches the list, and sends your GitHub token if you configured one.
+
+## Development
+
+Link your working copy:
+
+```sh
+mise plugin link --force duckdb .
 ```
 
-2. Test version listing:
-```bash
-mise ls-remote <BACKEND>:<some-tool>
-```
+| Task | Description |
+| --- | --- |
+| `mise run test-unit` | Run the unit tests for the helpers in `lib/` |
+| `mise run test` | Install, load and uninstall extensions in an isolated mise environment |
+| `mise run lint` | Check formatting, types and GitHub Actions workflows |
+| `mise run ci` | Run all checks |
 
-3. Test installation:
-```bash
-mise install <BACKEND>:<some-tool>@latest
-```
-
-4. Test execution:
-```bash
-mise exec <BACKEND>:<some-tool>@latest -- <some-tool> --version
-```
-
-5. Run tests:
-```bash
-mise run test
-```
-
-6. Run linting:
-```bash
-mise run lint
-```
-
-7. Run full CI suite:
-```bash
-mise run ci
-```
-
-### Code Quality
-
-This template uses [hk](https://hk.jdx.dev) for modern linting and pre-commit hooks:
-
-- **Automatic formatting**: `stylua` formats Lua code
-- **Static analysis**: `luacheck` catches Lua issues  
-- **GitHub Actions linting**: `actionlint` validates workflows
-- **Pre-commit hooks**: Runs all checks automatically on git commit
-
-Manual commands:
-```bash
-hk check      # Run all linters (same as mise run lint)
-hk fix        # Run linters and auto-fix issues
-```
-
-### Debugging
-
-Enable debug output:
-```bash
-mise --debug install <BACKEND>:<tool>@<version>
-```
-
-## Files
-
-- `metadata.lua` – Backend plugin metadata and configuration
-- `hooks/backend_list_versions.lua` – Lists available versions for tools
-- `hooks/backend_install.lua` – Installs specific versions of tools
-- `hooks/backend_exec_env.lua` – Sets up environment variables for tools
-- `.github/workflows/ci.yml` – GitHub Actions CI/CD pipeline
-- `mise.toml` – Development tools and configuration
-- `mise-tasks/` – Task scripts for testing
-- `hk.pkl` – Modern linting and pre-commit hook configuration
-- `.luacheckrc` – Lua linting configuration
-- `stylua.toml` – Lua formatting configuration
-
-## Backend Examples
-
-### Package Manager Backend (npm-style)
-```lua
--- backend_list_versions.lua
-function PLUGIN:BackendListVersions(ctx)
-    local cmd = require("cmd")
-    local json = require("json")
-    local result = cmd.exec("mypm view " .. ctx.tool .. " versions --json")
-    return {versions = json.decode(result)}
-end
-
--- backend_install.lua  
-function PLUGIN:BackendInstall(ctx)
-    local cmd = require("cmd")
-    cmd.exec("mypm install " .. ctx.tool .. "@" .. ctx.version .. " --prefix " .. ctx.install_path)
-    return {}
-end
-
--- backend_exec_env.lua
-function PLUGIN:BackendExecEnv(ctx)
-    return {
-        env_vars = {
-            {key = "PATH", value = ctx.install_path .. "/bin"}
-        }
-    }
-end
-```
-
-### Binary Download Backend (GitHub releases-style)
-```lua
--- backend_list_versions.lua
-function PLUGIN:BackendListVersions(ctx)
-    local http = require("http")
-    local json = require("json")
-    local resp = http.get({url = "https://api.github.com/repos/owner/" .. ctx.tool .. "/releases"})
-    local releases = json.decode(resp.body)
-    local versions = {}
-    for _, release in ipairs(releases) do
-        table.insert(versions, release.tag_name:gsub("^v", ""))
-    end
-    return {versions = versions}
-end
-
--- backend_install.lua
-function PLUGIN:BackendInstall(ctx)
-    local platform = RUNTIME.osType:lower()
-    local arch = RUNTIME.archType
-    local url = "https://github.com/owner/" .. ctx.tool .. "/releases/download/v" .. ctx.version .. 
-                "/" .. ctx.tool .. "-" .. platform .. "-" .. arch .. ".tar.gz"
-    
-    local http = require("http")
-    local file = require("file")
-    local archiver = require("archiver")
-    local temp_file = file.join_path(ctx.download_path, "tool.tar.gz")
-    http.download_file({url = url}, temp_file)
-
-    archiver.decompress(temp_file, ctx.install_path)
-    return {}
-end
-```
-
-## Real-World Examples
-
-- [vfox-npm](https://github.com/jdx/vfox-npm) - Backend for npm packages
-- Study existing mise backends: npm, cargo, pip, gem
-
-## Context Variables Reference
-
-### BackendListVersions Context
-| Variable | Type | Description | Example |
-|----------|------|-------------|---------|
-| `ctx.tool` | string | Tool name | `"prettier"` |
-| `ctx.options` | table | Plugin options from `mise.toml` | `{}` |
-
-### BackendInstall Context
-| Variable | Type | Description | Example |
-|----------|------|-------------|---------|
-| `ctx.tool` | string | Tool name | `"prettier"` |
-| `ctx.version` | string | Tool version | `"3.0.0"` |
-| `ctx.install_path` | string | Installation directory | `"/home/user/.local/share/mise/installs/npm/prettier/3.0.0"` |
-| `ctx.download_path` | string | Download cache directory | `"/home/user/.local/share/mise/downloads/npm/prettier/3.0.0"` |
-| `ctx.options` | table | Plugin options from `mise.toml` | `{}` |
-
-### BackendExecEnv Context
-| Variable | Type | Description | Example |
-|----------|------|-------------|---------|
-| `ctx.tool` | string | Tool name | `"prettier"` |
-| `ctx.version` | string | Tool version | `"3.0.0"` |
-| `ctx.install_path` | string | Installation directory | `"/home/user/.local/share/mise/installs/npm/prettier/3.0.0"` |
-| `ctx.options` | table | Plugin options from `mise.toml` | `{}` |
-
-### Available Lua Modules
-
-Backend plugins have access to these built-in modules:
-
-- `cmd` - Execute shell commands
-- `http` - HTTP client for downloads and API calls  
-- `json` - JSON parsing and encoding
-- `file` - File system operations
-- `archiver` - Archive extraction
-
-## Publishing
-
-1. Ensure all tests pass: `mise run ci`
-2. Create a GitHub repository for your plugin
-3. Push your code
-4. Test with: `mise plugin install mybackend https://github.com/user/mise-mybackend`
-
-## Documentation
-
-- [Backend Plugin Development](https://mise.jdx.dev/backend-plugin-development.html) - Complete guide
-- [Backend Architecture](https://mise.jdx.dev/dev-tools/backend_architecture.html) - How backends work
-- [Lua modules reference](https://mise.jdx.dev/plugin-lua-modules.html) - Available modules
+The unit tests compare the install info files that the plugin writes with files that DuckDB wrote. These files are in `tests/fixtures/`.
 
 ## License
 

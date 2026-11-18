@@ -6,7 +6,7 @@ PLUGIN = { -- luacheck: ignore
     name = "duckdb",
     version = "0.1.0",
     description = "Install DuckDB extensions into the DuckDB extension directory",
-    author = "timkendrick",
+    author = "Tim Kendrick",
     license = "MIT",
     homepage = "https://github.com/timkendrick/mise-duckdb",
 }
