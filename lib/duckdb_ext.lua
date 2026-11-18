@@ -50,13 +50,7 @@ local FOOTER_MAGIC_VALUE = "4"
 
 ---@class DuckDBRelease
 ---@field version string
----@field created_at string|nil
-
----@class GitHubRelease
----@field tag_name string
----@field prerelease boolean
----@field draft boolean
----@field published_at any
+---@field created_at string Release date as an RFC 3339 timestamp
 
 ---@param name any
 ---@return string
@@ -311,20 +305,58 @@ local function version_less_than(a, b)
     return false
 end
 
---- Selects the stable DuckDB releases, oldest first.
----@param releases GitHubRelease[]
----@return DuckDBRelease[]
-function M.stable_duckdb_releases(releases)
-    local result = {}
-    for _, release in ipairs(releases) do
-        local version = type(release.tag_name) == "string" and release.tag_name:match("^v(%d+%.%d+%.%d+)$")
-        if version and release.prerelease ~= true and release.draft ~= true then
-            local created_at = nil
-            if type(release.published_at) == "string" then
-                created_at = release.published_at
-            end
-            result[#result + 1] = { version = version, created_at = created_at }
+---@param line string
+---@return string[]
+local function split_csv_line(line)
+    if line:find('"', 1, true) then
+        error("unsupported quoted field in DuckDB release list: " .. line)
+    end
+    local fields = {}
+    for field in (line .. ","):gmatch("([^,]*),") do
+        fields[#fields + 1] = field
+    end
+    return fields
+end
+
+---@param header string[]
+---@param name string
+---@return integer
+local function column_index(header, name)
+    for index, column in ipairs(header) do
+        if column == name then
+            return index
         end
+    end
+    error("DuckDB release list has no '" .. name .. "' column")
+end
+
+--- Parses the DuckDB release list that duckdb.org publishes as CSV, and returns the releases oldest first.
+---@param csv string
+---@return DuckDBRelease[]
+function M.parse_releases_csv(csv)
+    local lines = {}
+    for line in csv:gmatch("[^\r\n]+") do
+        lines[#lines + 1] = line
+    end
+    if #lines == 0 then
+        error("DuckDB release list is empty")
+    end
+    local header = split_csv_line(lines[1])
+    local date_column = column_index(header, "release_date")
+    local version_column = column_index(header, "version_number")
+
+    local result = {}
+    for index = 2, #lines do
+        local fields = split_csv_line(lines[index])
+        local version = fields[version_column]
+        local date = fields[date_column]
+        if version == nil or not version:match("^%d+%.%d+%.%d+$") then
+            error("invalid version in DuckDB release list: " .. lines[index])
+        end
+        if date == nil or not date:match("^%d%d%d%d%-%d%d%-%d%d$") then
+            error("invalid release date in DuckDB release list: " .. lines[index])
+        end
+        result[#result + 1] = { version = version, created_at = date .. "T00:00:00Z" }
     end
     table.sort(result, function(a, b)
         return version_less_than(a.version, b.version)

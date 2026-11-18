@@ -294,22 +294,45 @@ test("extension_root rejects a relative path", function()
     end, "must be an absolute path")
 end)
 
-test("stable_duckdb_releases keeps stable releases in version order", function()
-    local null = setmetatable({}, {})
-    local releases = ext.stable_duckdb_releases({
-        { tag_name = "v1.5.0", prerelease = false, draft = false, published_at = "2026-02-01T00:00:00Z" },
-        { tag_name = "v1.4.10", prerelease = false, draft = false, published_at = "2026-03-01T00:00:00Z" },
-        { tag_name = "v1.4.9", prerelease = false, draft = false, published_at = null },
-        { tag_name = "v2.0.0-rc1", prerelease = false, draft = false, published_at = "2026-04-01T00:00:00Z" },
-        { tag_name = "v2.0.0", prerelease = true, draft = false, published_at = "2026-04-02T00:00:00Z" },
-        { tag_name = "v2.0.1", prerelease = false, draft = true, published_at = "2026-04-03T00:00:00Z" },
-    })
+test("parse_releases_csv reads the duckdb.org release list oldest first", function()
+    local releases = ext.parse_releases_csv(read_fixture("duckdb-releases.csv"))
+    assert_equal(#releases, 65, "release count")
+    assert_equal(releases[1].version, "0.1.0")
+    assert_equal(releases[1].created_at, "2019-06-27T00:00:00Z")
+    assert_equal(releases[#releases].version, "2.0.0")
+    assert_equal(releases[#releases].created_at, "2026-10-21T00:00:00Z")
+end)
+
+test("parse_releases_csv orders versions numerically and finds columns by name", function()
+    local releases = ext.parse_releases_csv(
+        "lts,version_number,release_date\r\n"
+            .. "false,1.4.10,2026-03-01\r\n"
+            .. "false,1.5.0,2026-02-01\r\n"
+            .. "false,1.4.9,2026-01-01\r\n"
+    )
     assert_equal(#releases, 3, "release count")
     assert_equal(releases[1].version, "1.4.9")
-    assert_equal(releases[1].created_at, nil)
     assert_equal(releases[2].version, "1.4.10")
     assert_equal(releases[3].version, "1.5.0")
     assert_equal(releases[3].created_at, "2026-02-01T00:00:00Z")
+end)
+
+test("parse_releases_csv rejects a list without a version column", function()
+    assert_error(function()
+        ext.parse_releases_csv("release_date,lts\n2026-01-01,false\n")
+    end, "no 'version_number' column")
+end)
+
+test("parse_releases_csv rejects an invalid version", function()
+    assert_error(function()
+        ext.parse_releases_csv("release_date,version_number\n2026-01-01,2.0\n")
+    end, "invalid version in DuckDB release list")
+end)
+
+test("parse_releases_csv rejects quoted fields", function()
+    assert_error(function()
+        ext.parse_releases_csv('release_date,version_number,codename\n2026-01-01,2.0.0,"Teal, Cinnamon"\n')
+    end, "unsupported quoted field")
 end)
 
 test("extension_names_from_stats removes metadata keys", function()

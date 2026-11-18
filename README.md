@@ -46,7 +46,7 @@ DuckDB extension binaries work with one DuckDB version only. A DuckDB extension 
 | `latest` | The build for the newest stable DuckDB release |
 | `2.0.0+v0.4.0` | Version `v0.4.0` of the extension, built for DuckDB 2.0.0 |
 
-`mise ls-remote duckdb:<extension>` lists every stable DuckDB release. The list does not check that the repository publishes the extension for each release. If it does not, install fails with an error such as:
+`mise ls-remote duckdb:<extension>` lists every DuckDB release from the [release list on duckdb.org](https://duckdb.org/data/duckdb-releases.csv). The list does not check that the repository publishes the extension for each release. If it does not, install fails with an error such as:
 
 ```text
 spatial is not published for DuckDB v2.1.0 on osx_arm64 in http://extensions.duckdb.org
@@ -126,7 +126,6 @@ The plugin supports macOS and Linux on x86-64 and ARM64, including Linux with mu
 - **Upgrades remove old builds:** for a tool with version `latest`, `mise upgrade` installs the build for the new DuckDB release and removes the build for the old release. A DuckDB CLI of the old version then cannot find the extension. Upgrade the DuckDB CLI at the same time.
 - **Built-in extensions:** the DuckDB CLI includes some extensions, such as `parquet`, `json` and `icu`. The plugin installs these, but DuckDB uses its built-in copy.
 - **Two versions for one DuckDB version:** if you configure both `2.0.0` and `2.0.0+v0.4.0` for one extension, both link to the same files. The last install wins.
-- **GitHub API:** the version list comes from the GitHub releases of DuckDB. mise caches the list, and sends your GitHub token if you configured one.
 
 ## Development
 
