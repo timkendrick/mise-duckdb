@@ -11,7 +11,7 @@ stylua = "latest"
 
 [tasks.format]
 description = "Format Lua scripts"
-run = "stylua metadata.lua hooks/"
+run = "stylua metadata.lua hooks/ lib/ tests/"
 
 [tasks.lint]
 description = "Lint Lua scripts and GitHub Actions using hk"
@@ -21,6 +21,10 @@ run = "hk check"
 description = "Fix linting issues"
 run = "hk fix"
 
+[tasks.test-unit]
+description = "Run unit tests for the Lua helper library"
+run = "lua tests/run.lua"
+
 [tasks.ci]
 description = "Run all CI checks"
-depends = ["lint", "test"]
+depends = ["lint", "test-unit", "test"]
