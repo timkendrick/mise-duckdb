@@ -1,42 +1,146 @@
 #!/usr/bin/env bash
-#MISE description="Run backend plugin tests - test plugin linking and basic functionality"
+#MISE description="Install, load and uninstall DuckDB extensions through the plugin in an isolated mise environment"
 set -euo pipefail
 
-# Link the plugin for testing
-mise plugin link --force "<BACKEND>" .
+usage() {
+    cat <<EOF
+Usage: mise run test [--keep] [--help]
 
-# Clear cache to ensure fresh testing
-mise cache clear
+Links this plugin into an isolated mise environment, installs a core and a
+community extension into a temporary DuckDB extension directory, loads them
+with the duckdb CLI on PATH, and uninstalls them.
 
-# Test that the plugin can list tools (this should work even if no tools are available)
-echo "Testing plugin linking and basic functionality..."
+Options:
+  --keep    Keep the temporary directory after the test
+  --help    Show this help
+EOF
+}
 
-# Try to list available versions for a test tool
-# Note: This will likely fail until you implement the backend methods
-# Replace <TEST_TOOL> with a real tool name your backend supports
-TEST_TOOL="<TEST_TOOL>"
+keep=false
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --keep) keep=true ;;
+        --help)
+            usage
+            exit 0
+            ;;
+        *)
+            usage >&2
+            exit 1
+            ;;
+    esac
+    shift
+done
 
-echo "Testing version listing for ${TEST_TOOL}..."
-if mise ls-remote "<BACKEND>:${TEST_TOOL}" 2>/dev/null; then
-    echo "✓ Version listing works"
+if [[ -t 2 && -z "${NO_COLOR:-}" ]]; then
+    color_reset=$'\033[0m'
+    color_red=$'\033[31m'
+    color_green=$'\033[32m'
+    color_dim=$'\033[2m'
 else
-    echo "⚠ Version listing failed - implement backend_list_versions.lua for your backend"
+    color_reset=""
+    color_red=""
+    color_green=""
+    color_dim=""
 fi
 
-# Test installation if versions are available
-echo "Testing installation..."
-if mise install "<BACKEND>:${TEST_TOOL}@latest" 2>/dev/null; then
-    echo "✓ Installation works"
-    
-    # Test that the tool can be executed
-    if mise exec "<BACKEND>:${TEST_TOOL}@latest" -- ${TEST_TOOL} --version 2>/dev/null; then
-        echo "✓ Tool execution works"
+log() {
+    printf '%s%s%s\n' "$color_dim" "$*" "$color_reset" >&2
+}
+
+pass() {
+    printf '%sok%s   %s\n' "$color_green" "$color_reset" "$*" >&2
+}
+
+fail() {
+    printf '%sFAIL%s %s\n' "$color_red" "$color_reset" "$*" >&2
+    exit 1
+}
+
+plugin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+duckdb_bin="$(command -v duckdb)" || fail "duckdb is not on PATH"
+
+duckdb_query() {
+    env -u AI_AGENT "$duckdb_bin" -csv -noheader -c "$1"
+}
+
+duckdb_tag="$(env -u AI_AGENT "$duckdb_bin" --version | awk '{ print $1 }')"
+duckdb_version="${duckdb_tag#v}"
+platform="$(duckdb_query "PRAGMA platform")"
+log "duckdb CLI $duckdb_tag on $platform at $duckdb_bin"
+
+work_dir="$(mktemp -d)"
+cleanup() {
+    if [[ "$keep" == true ]]; then
+        log "kept $work_dir"
     else
-        echo "⚠ Tool execution failed - check backend_exec_env.lua implementation"
+        rm -rf "$work_dir"
     fi
-else
-    echo "⚠ Installation failed - implement backend_install.lua for your backend"
-fi
+}
+trap cleanup EXIT
 
-echo "✓ Basic plugin structure tests completed"
-echo "Note: Replace <TEST_TOOL> with a real tool and implement the backend methods"
+export MISE_DATA_DIR="$work_dir/data"
+export MISE_CACHE_DIR="$work_dir/cache"
+export MISE_CONFIG_DIR="$work_dir/config"
+export MISE_STATE_DIR="$work_dir/state"
+export MISE_GLOBAL_CONFIG_FILE="$work_dir/config/config.toml"
+export MISE_TRUSTED_CONFIG_PATHS="$work_dir"
+export MISE_YES=1
+
+extension_root="$work_dir/extensions"
+link_dir="$extension_root/$duckdb_tag/$platform"
+project_dir="$work_dir/project"
+mkdir -p "$project_dir" "$link_dir"
+cd "$project_dir"
+
+mise plugin link --force duckdb "$plugin_dir" >&2
+
+log "listing versions"
+mise ls-remote duckdb:h3 | grep -qx "$duckdb_version" || fail "ls-remote does not list DuckDB $duckdb_version"
+pass "ls-remote lists DuckDB $duckdb_version"
+
+cat >mise.toml <<EOF
+[tools]
+"duckdb:h3" = { version = "$duckdb_version", repository = "community", extension_directory = "$extension_root" }
+"duckdb:inet" = { version = "$duckdb_version", extension_directory = "$extension_root" }
+EOF
+
+echo "not an extension" >"$link_dir/h3.duckdb_extension"
+
+log "installing h3 and inet"
+mise install >&2
+
+for name in h3 inet; do
+    for file in "$name.duckdb_extension" "$name.duckdb_extension.info"; do
+        [[ -L "$link_dir/$file" ]] || fail "$link_dir/$file is not a link"
+        [[ -f "$link_dir/$file" ]] || fail "$link_dir/$file links to a missing file"
+    done
+done
+pass "install links both files of each extension, and replaces an existing file"
+
+origins="$(duckdb_query "SET extension_directory = '$extension_root'; LOAD h3; LOAD inet;
+    SELECT extension_name || ':' || install_mode || ':' || installed_from
+    FROM duckdb_extensions() WHERE extension_name IN ('h3', 'inet') ORDER BY 1" | grep -oE '(h3|inet):[A-Z_]+:[a-z_]+')"
+expected_origins=$'h3:REPOSITORY:community\ninet:REPOSITORY:core'
+[[ "$origins" == "$expected_origins" ]] || fail "unexpected extension origins: $origins"
+pass "duckdb loads both extensions and reports their repositories"
+
+log "installing an unpublished extension version"
+if output="$(mise install "duckdb:h3@$duckdb_version+v0.0.0-missing" 2>&1)"; then
+    fail "installing an unpublished extension version succeeded"
+fi
+grep -q "is not published for DuckDB $duckdb_tag" <<<"$output" || fail "unexpected error: $output"
+pass "install reports an unpublished extension version"
+
+rm "$link_dir/inet.duckdb_extension"
+echo "installed by DuckDB" >"$link_dir/inet.duckdb_extension"
+
+log "uninstalling h3 and inet"
+mise uninstall "duckdb:h3@$duckdb_version" "duckdb:inet@$duckdb_version" >&2
+
+[[ ! -e "$link_dir/h3.duckdb_extension" && ! -L "$link_dir/h3.duckdb_extension" ]] ||
+    fail "uninstall did not remove the h3 link"
+[[ ! -L "$link_dir/inet.duckdb_extension.info" ]] || fail "uninstall did not remove the inet info link"
+[[ "$(cat "$link_dir/inet.duckdb_extension")" == "installed by DuckDB" ]] ||
+    fail "uninstall changed a file that it did not create"
+pass "uninstall removes its links and keeps other files"
